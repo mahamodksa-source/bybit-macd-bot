@@ -84,3 +84,4 @@ if __name__ == "__main__":
     while True:
         scanner()
         time.sleep(60)  # فحص كل دقيقة
+
