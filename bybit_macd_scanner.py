@@ -2,11 +2,11 @@ import os
 import time
 import requests
 import pandas as pd
-from datetime import datetime, timezone   # ← استخدمنا timezone
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 # ====== الإعدادات من Environment ======
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")                # Render > Settings > Environment
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")                # Render / Railway > Settings > Environment
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")                     # مثال: 618962376 (يقبل سترنق)
 INTERVAL = os.getenv("INTERVAL_MIN", "15")                  # قيم Bybit المسموحة: 1,3,5,15,30,60,120,240,360,720,D,W,M
 MIN_VOLUME = float(os.getenv("MIN_VOLUME_USD", "500000"))   # بالدولار
@@ -18,7 +18,7 @@ session.headers.update({
     "Accept": "application/json",
 })
 TIMEOUT = 20
-BASE_URL = os.getenv("BYBIT_API_BASE", "https://api.bybit.com")  # ← من الـEnv إن أردت
+BASE_URL = os.getenv("BYBIT_API_BASE", "https://api.bybit.com")
 
 # كاش للرموز وآخر التنبيهات
 spot_symbols_cache: List[str] = []
@@ -26,38 +26,32 @@ last_alerts: Dict[str, pd.Timestamp] = {}
 
 # ====== دوال مساعدة للشبكة ======
 def _get_json(path: str, params: Optional[dict] = None, max_retries: int = 3, timeout: int = TIMEOUT):
-    """طلب GET مع تحقّق من HTTP/JSON وRetries بسيطة"""
     url = f"{BASE_URL}{path}"
     last_err = None
     for i in range(max_retries):
         try:
             r = session.get(url, params=params, timeout=timeout)
-            # تحقق من الكود
             if r.status_code != 200:
                 raise RuntimeError(f"HTTP {r.status_code}; ct={r.headers.get('Content-Type')} body={r.text[:300]}")
-            # تأكد أن الرد JSON (تجنب صفحات HTML)
             if "application/json" not in (r.headers.get("Content-Type") or ""):
                 raise RuntimeError(f"Non-JSON response; ct={r.headers.get('Content-Type')} body={r.text[:300]}")
             data = r.json()
-            # Bybit v5 يرجّع retCode=0 في النجاح
             if isinstance(data, dict) and data.get("retCode") not in (0, None):
                 raise RuntimeError(f"Bybit retCode={data.get('retCode')} msg={data.get('retMsg')}")
             return data
         except Exception as e:
             last_err = e
             print(f"⚠️ HTTP try {i+1} failed: {e}")
-            time.sleep(1.5 * (i + 1))   # backoff بسيط
+            time.sleep(1.5 * (i + 1))
     raise RuntimeError(f"Failed after retries: {last_err}")
 
 # ====== Telegram ======
 def send_telegram(text: str) -> bool:
-    token = TELEGRAM_TOKEN
-    chat_id = CHAT_ID
-    if not token or not chat_id:
+    if not TELEGRAM_TOKEN or not CHAT_ID:
         print("⚠️ TELEGRAM_TOKEN/CHAT_ID غير موجودين في Environment.")
         return False
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text}
     try:
         r = session.post(url, json=payload, timeout=TIMEOUT)
         if r.status_code != 200:
@@ -100,8 +94,8 @@ def get_klines(symbol: str, interval_min: str = "15", limit: int = 200) -> Optio
         if not rows:
             return None
         df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "turnover"])
-        # تحويل الأنواع
-        df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+        # ✅ إصلاح التحذير: تحويل العمود لرقم أولاً
+        df["time"] = pd.to_datetime(pd.to_numeric(df["time"], errors="coerce"), unit="ms", utc=True)
         for col in ["open", "high", "low", "close", "volume", "turnover"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna(subset=["close", "volume"]).sort_values("time").reset_index(drop=True)
@@ -121,9 +115,7 @@ def compute_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int =
 
 # ====== الماسح ======
 def scanner():
-    # اجلب الرموز مرة واحدة (الكاش يمنع إعادة الجلب المتكرر)
     symbols = get_spot_symbols()
-    # ← استبدل utcnow بوقت واعٍ بالمنطقة
     print(f"✅ [{datetime.now(timezone.utc).isoformat()}] عدد أزواج USDT: {len(symbols)}")
 
     for sym in symbols:
@@ -133,14 +125,12 @@ def scanner():
 
         df = compute_macd(df)
         close = float(df["close"].iloc[-1])
-        # فوليوم الشمعة بالدولار
         volume_usd = float(df["volume"].iloc[-1]) * close
         ts = df["time"].iloc[-1]
 
         macd_prev, signal_prev = float(df["macd"].iloc[-2]), float(df["signal"].iloc[-2])
         macd_now, signal_now   = float(df["macd"].iloc[-1]), float(df["signal"].iloc[-1])
 
-        # تقاطع صعودي + فوليوم كافي
         if macd_prev < signal_prev and macd_now > signal_now and volume_usd >= MIN_VOLUME:
             last_ts = last_alerts.get(sym)
             if last_ts != ts:
@@ -155,8 +145,7 @@ def scanner():
                 send_telegram(msg)
                 last_alerts[sym] = ts
 
-        # احترام API (خفّض السرعة لتجنب Rate Limit)
-        time.sleep(0.2)
+        time.sleep(0.2)  # احترام الـ API
 
 def main():
     print("🚀 Bybit MACD Scanner started.")
@@ -164,10 +153,9 @@ def main():
     if not CHAT_ID:
         print("⚠️ لا يوجد TELEGRAM_CHAT_ID في Environment.")
 
-    # اختبار تلغرام عند بدء التشغيل
     test_telegram()
 
-    interval_seconds = 60  # افحص كل دقيقة
+    interval_seconds = 60
     while True:
         try:
             scanner()
