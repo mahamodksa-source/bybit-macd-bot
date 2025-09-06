@@ -1,4 +1,0 @@
-python-binance
-pybit
-pandas
-numpy
