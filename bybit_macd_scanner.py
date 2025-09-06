@@ -2,14 +2,14 @@ import os
 import time
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone   # ← استخدمنا timezone
 from typing import Dict, List, Optional
 
 # ====== الإعدادات من Environment ======
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")          # ضعها في Render > Settings > Environment
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")               # مثلاً 618962376
-INTERVAL = int(os.getenv("INTERVAL_MIN", "15"))       # دقائق (Bybit يدعم: 1,3,5,15,30,60,120,240,360,720,D,W,M)
-MIN_VOLUME = float(os.getenv("MIN_VOLUME_USD", "500000"))  # بالدولار
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")                # Render > Settings > Environment
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")                     # مثال: 618962376 (يقبل سترنق)
+INTERVAL = os.getenv("INTERVAL_MIN", "15")                  # قيم Bybit المسموحة: 1,3,5,15,30,60,120,240,360,720,D,W,M
+MIN_VOLUME = float(os.getenv("MIN_VOLUME_USD", "500000"))   # بالدولار
 
 # ====== جلسة HTTP مع مهلة وإعادة محاولات ======
 session = requests.Session()
@@ -18,7 +18,7 @@ session.headers.update({
     "Accept": "application/json",
 })
 TIMEOUT = 20
-BASE_URL = "https://api.bybit.com"
+BASE_URL = os.getenv("BYBIT_API_BASE", "https://api.bybit.com")  # ← من الـEnv إن أردت
 
 # كاش للرموز وآخر التنبيهات
 spot_symbols_cache: List[str] = []
@@ -32,10 +32,12 @@ def _get_json(path: str, params: Optional[dict] = None, max_retries: int = 3, ti
     for i in range(max_retries):
         try:
             r = session.get(url, params=params, timeout=timeout)
+            # تحقق من الكود
             if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
-            if "application/json" not in r.headers.get("Content-Type", ""):
-                raise RuntimeError(f"Non-JSON response: {r.text[:200]}")
+                raise RuntimeError(f"HTTP {r.status_code}; ct={r.headers.get('Content-Type')} body={r.text[:300]}")
+            # تأكد أن الرد JSON (تجنب صفحات HTML)
+            if "application/json" not in (r.headers.get("Content-Type") or ""):
+                raise RuntimeError(f"Non-JSON response; ct={r.headers.get('Content-Type')} body={r.text[:300]}")
             data = r.json()
             # Bybit v5 يرجّع retCode=0 في النجاح
             if isinstance(data, dict) and data.get("retCode") not in (0, None):
@@ -44,8 +46,7 @@ def _get_json(path: str, params: Optional[dict] = None, max_retries: int = 3, ti
         except Exception as e:
             last_err = e
             print(f"⚠️ HTTP try {i+1} failed: {e}")
-            # backoff بسيط لتخفيف rate limit
-            time.sleep(1.5 * (i + 1))
+            time.sleep(1.5 * (i + 1))   # backoff بسيط
     raise RuntimeError(f"Failed after retries: {last_err}")
 
 # ====== Telegram ======
@@ -68,12 +69,8 @@ def send_telegram(text: str) -> bool:
         return False
 
 def test_telegram() -> None:
-    """يرسل رسالة اختبار ويطبع النتيجة في اللوج"""
     ok = send_telegram("✅ تم تشغيل Bybit MACD Scanner (رسالة اختبار).")
-    if ok:
-        print("✅ Telegram test: OK (تم الإرسال).")
-    else:
-        print("❌ Telegram test: FAILED (تحقق من التوكن/الـ CHAT_ID أو الشبكة).")
+    print("✅ Telegram test: OK." if ok else "❌ Telegram test: FAILED.")
 
 # ====== Bybit ======
 def get_spot_symbols(force_refresh: bool = False) -> List[str]:
@@ -93,7 +90,7 @@ def get_spot_symbols(force_refresh: bool = False) -> List[str]:
         spot_symbols_cache = []
     return spot_symbols_cache
 
-def get_klines(symbol: str, interval_min: int = 15, limit: int = 200) -> Optional[pd.DataFrame]:
+def get_klines(symbol: str, interval_min: str = "15", limit: int = 200) -> Optional[pd.DataFrame]:
     try:
         data = _get_json(
             "/v5/market/kline",
@@ -126,7 +123,8 @@ def compute_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int =
 def scanner():
     # اجلب الرموز مرة واحدة (الكاش يمنع إعادة الجلب المتكرر)
     symbols = get_spot_symbols()
-    print(f"✅ [{datetime.utcnow().isoformat()}Z] عدد أزواج USDT: {len(symbols)}")
+    # ← استبدل utcnow بوقت واعٍ بالمنطقة
+    print(f"✅ [{datetime.now(timezone.utc).isoformat()}] عدد أزواج USDT: {len(symbols)}")
 
     for sym in symbols:
         df = get_klines(sym, interval_min=INTERVAL)
@@ -157,15 +155,12 @@ def scanner():
                 send_telegram(msg)
                 last_alerts[sym] = ts
 
-        # احترام API (قلّل السرعة لو واجهت Rate Limit)
+        # احترام API (خفّض السرعة لتجنب Rate Limit)
         time.sleep(0.2)
 
 def main():
     print("🚀 Bybit MACD Scanner started.")
-    if TELEGRAM_TOKEN:
-        print("✅ TELEGRAM_TOKEN مضبوط.")
-    else:
-        print("⚠️ لا يوجد TELEGRAM_TOKEN في Environment.")
+    print("✅ TELEGRAM_TOKEN مضبوط." if TELEGRAM_TOKEN else "⚠️ لا يوجد TELEGRAM_TOKEN في Environment.")
     if not CHAT_ID:
         print("⚠️ لا يوجد TELEGRAM_CHAT_ID في Environment.")
 
