@@ -1,1 +1,1 @@
-worker: bybit_macd_scanner.py
+worker: python bybit_macd_scanner.py
